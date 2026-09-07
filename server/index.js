@@ -4,12 +4,29 @@ import { createRequire } from 'node:module'
 import dotenv from 'dotenv'
 import express from 'express'
 
+import {
+  createUser,
+  findUserByUsername,
+  findUserById,
+  saveHistory,
+  getHistoryList,
+  getHistoryById,
+  deleteHistory,
+} from './db.js'
+import {
+  hashPassword,
+  comparePassword,
+  signToken,
+  requireAuth,
+  isProduction,
+  getInviteCode,
+} from './auth.js'
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
 const require = createRequire(import.meta.url)
 
-// 显式按固定路径加载，避免依赖进程 CWD（PM2 可能从 server/ 或根目录启动）。
-// dotenv 默认不覆盖已存在的环境变量，因此根目录 .env 优先，server/.env 兜底。
+// 显式按固定路径加载，避免依赖进程 CWD（PM2 可能从 server/ 或根目录启动）
 dotenv.config({ path: path.join(ROOT, '.env') })
 dotenv.config({ path: path.join(__dirname, '.env') })
 
@@ -21,42 +38,56 @@ const GLM_API_KEY = process.env.GLM_API_KEY || ''
 const GLM_OCR_URL =
   process.env.GLM_OCR_URL || 'https://open.bigmodel.cn/api/paas/v4/layout_parsing'
 const GLM_OCR_MODEL = process.env.GLM_OCR_MODEL || 'glm-ocr'
+const INVITE_CODE = getInviteCode()
 
-// 单图上限 10MB（GLM-OCR 限制），留一点余量给 base64 膨胀
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const REQUEST_TIMEOUT_MS = Number(process.env.OCR_TIMEOUT_MS || 120_000)
 
-// ---- API Key fail-fast（生产环境不允许缺失或使用占位值）----
+// ---------- fail-fast ----------
 if (!GLM_API_KEY) {
   const msg = '[ocr-page] FATAL: 缺少 GLM_API_KEY，请在项目根目录 .env 或 server/.env 中配置'
-  if (NODE_ENV === 'production') {
+  if (isProduction()) {
     console.error(msg)
     process.exit(1)
   }
   console.warn(msg + '（开发环境继续启动，识别会返回 503）')
 }
 
+if (!INVITE_CODE) {
+  const msg = '[ocr-page] FATAL: 生产环境必须设置 INVITE_CODE（注册邀请码）'
+  if (isProduction()) {
+    console.error(msg)
+    process.exit(1)
+  }
+  console.warn(msg + '（开发环境允许开放注册）')
+}
+
+if (!process.env.JWT_SECRET) {
+  const msg = '[ocr-page] FATAL: 缺少 JWT_SECRET'
+  if (isProduction()) {
+    console.error(msg)
+    process.exit(1)
+  }
+  console.warn(msg + '（开发环境将使用临时密钥）')
+}
+
+// ---------- Express ----------
 const app = express()
 app.disable('x-powered-by')
 app.set('trust proxy', true)
 
-app.use(
-  express.json({
-    limit: '14mb',
-  })
-)
+app.use(express.json({ limit: '14mb' }))
 
-// ---------- 安全响应头 ----------
+// 安全响应头
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('X-Frame-Options', 'DENY')
   res.setHeader('Referrer-Policy', 'no-referrer')
-  res.setHeader('Permissions-Policy', 'camera=(self), microphone=()')
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=()')
   res.setHeader(
     'Content-Security-Policy',
     [
       "default-src 'self'",
-      // marked 生成的行内样式 + 版面标注需要的 inline style
       "style-src 'self' 'unsafe-inline'",
       "script-src 'self'",
       "img-src 'self' data: blob:",
@@ -70,46 +101,50 @@ app.use((req, res, next) => {
   next()
 })
 
-// ---------- 简单滑窗限流（内存）----------
-const RATE_WINDOW_MS = 10 * 60 * 1000
-const RATE_MAX = Number(process.env.RATE_MAX || 40)
-const buckets = new Map()
+// ---------- 限流 ----------
+function makeRateLimit(windowMs, max, keyFn) {
+  const buckets = new Map()
+  const clean = setInterval(() => {
+    const now = Date.now()
+    for (const [k, v] of buckets) {
+      if (now - v.start > windowMs) buckets.delete(k)
+    }
+  }, windowMs)
+  clean.unref()
 
-function rateLimit(req, res, next) {
-  const key = req.ip || 'unknown'
-  const now = Date.now()
-  const rec = buckets.get(key)
-
-  if (!rec || now - rec.start > RATE_WINDOW_MS) {
-    buckets.set(key, { start: now, count: 1 })
-    return next()
+  return (req, res, next) => {
+    const key = keyFn(req)
+    if (!key) return next()
+    const now = Date.now()
+    const rec = buckets.get(key)
+    if (!rec || now - rec.start > windowMs) {
+      buckets.set(key, { start: now, count: 1 })
+      return next()
+    }
+    rec.count += 1
+    if (rec.count > max) {
+      return res.status(429).json({ error: '请求过于频繁，请稍后再试' })
+    }
+    next()
   }
-  rec.count += 1
-  if (rec.count > RATE_MAX) {
-    return res.status(429).json({ error: '请求过于频繁，请稍后再试' })
-  }
-  next()
 }
 
-// 定期清理过期桶，避免内存增长
-setInterval(() => {
-  const now = Date.now()
-  for (const [k, v] of buckets) {
-    if (now - v.start > RATE_WINDOW_MS) buckets.delete(k)
-  }
-}, RATE_WINDOW_MS).unref()
+const authRateLimit = makeRateLimit(10 * 60 * 1000, 20, (req) => req.ip || 'unknown')
+const ocrRateLimit = makeRateLimit(
+  10 * 60 * 1000,
+  Number(process.env.RATE_MAX || 40),
+  (req) => String(req.userId || req.ip || 'unknown')
+)
 
-// ---------- 前端依赖（本地 vendor，避免依赖 CDN）----------
+// ---------- vendor ----------
 function serveFromNodeModules(routePath, pkgPath) {
   try {
     const abs = require.resolve(pkgPath)
     app.get(routePath, (req, res) => {
       res.type('application/javascript').sendFile(abs)
     })
-    return true
   } catch (err) {
-    console.warn(`[ocr-page] 无法定位 ${pkgPath}，${routePath} 将不可用: ${err.message}`)
-    return false
+    console.warn(`[ocr-page] 无法定位 ${pkgPath}: ${err.message}`)
   }
 }
 
@@ -134,7 +169,6 @@ function parseImageInput(body) {
     mime = m[1].toLowerCase()
     b64 = m[2]
   } else {
-    // 纯 base64，mime 从 body 取，默认 png
     mime = (typeof body?.mime === 'string' ? body.mime : 'image/png').toLowerCase()
     b64 = raw
   }
@@ -143,7 +177,6 @@ function parseImageInput(body) {
     return { error: `不支持的图片类型：${mime}（仅支持 PNG / JPEG / WEBP / BMP）` }
   }
 
-  // 去掉空白字符后校验 base64
   b64 = b64.replace(/\s+/g, '')
   if (!b64) return { error: '图片内容为空' }
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) {
@@ -165,13 +198,10 @@ function normalizeLayout(layoutDetails, dataInfo) {
     const dims = dataInfo?.pages?.[pageIndex] || {}
     const pw0 = Number(dims.width) || 0
     const ph0 = Number(dims.height) || 0
-
     const blocks = Array.isArray(pageBlocks) ? pageBlocks : []
+
     return blocks.map((b) => {
       let box = Array.isArray(b.bbox_2d) ? b.bbox_2d : null
-
-      // 实测上游返回的是像素坐标（并非文档所称的归一化值），需除以页面尺寸。
-      // 页面尺寸优先取 block 自带的 width/height，缺失时回退 data_info.pages。
       const pw = Number(b.width) || pw0
       const ph = Number(b.height) || ph0
 
@@ -196,7 +226,12 @@ function normalizeLayout(layoutDetails, dataInfo) {
   })
 }
 
-// ---------- 路由 ----------
+function deriveTitle(markdown) {
+  const first = markdown.trim().split('\n')[0] || ''
+  return first.replace(/^#+\s*/, '').slice(0, 80)
+}
+
+// ---------- 公开路由 ----------
 app.get('/health', (req, res) => res.json({ ok: true }))
 
 app.get('/api/info', (req, res) => {
@@ -206,17 +241,76 @@ app.get('/api/info', (req, res) => {
     status: GLM_API_KEY ? 'ready' : 'missing_api_key',
     model: GLM_OCR_MODEL,
     max_image_mb: 10,
+    auth_required: true,
     features: {
       layout_parsing: true,
       layout_boxes: true,
+      history: true,
       camera: false,
     },
   })
 })
 
-app.post('/api/ocr', rateLimit, async (req, res) => {
+// ---------- 认证路由 ----------
+app.post('/api/auth/register', authRateLimit, async (req, res) => {
+  const { username, password, inviteCode } = req.body || {}
+
+  if (INVITE_CODE && inviteCode !== INVITE_CODE) {
+    return res.status(403).json({ error: '邀请码错误' })
+  }
+
+  if (!username || typeof username !== 'string' || username.length < 2 || username.length > 32) {
+    return res.status(400).json({ error: '用户名长度 2-32 个字符' })
+  }
+  if (!/^[a-zA-Z0-9_\-\u4e00-\u9fa5]+$/.test(username)) {
+    return res.status(400).json({ error: '用户名只能包含中英文、数字、下划线和短横线' })
+  }
+  if (!password || typeof password !== 'string' || password.length < 6) {
+    return res.status(400).json({ error: '密码至少 6 位' })
+  }
+
+  const existing = findUserByUsername(username)
+  if (existing) {
+    return res.status(409).json({ error: '用户名已被占用' })
+  }
+
+  const passwordHash = await hashPassword(password)
+  const user = createUser(username, passwordHash)
+  const token = signToken({ userId: user.id, username: user.username })
+
+  res.json({ token, user: { id: user.id, username: user.username } })
+})
+
+app.post('/api/auth/login', authRateLimit, async (req, res) => {
+  const { username, password } = req.body || {}
+  if (!username || !password) {
+    return res.status(400).json({ error: '请填写用户名和密码' })
+  }
+
+  const user = findUserByUsername(username)
+  if (!user) {
+    return res.status(401).json({ error: '用户名或密码错误' })
+  }
+
+  const ok = await comparePassword(password, user.password_hash)
+  if (!ok) {
+    return res.status(401).json({ error: '用户名或密码错误' })
+  }
+
+  const token = signToken({ userId: user.id, username: user.username })
+  res.json({ token, user: { id: user.id, username: user.username } })
+})
+
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  const user = findUserById(req.userId)
+  if (!user) return res.status(401).json({ error: '用户不存在' })
+  res.json({ user })
+})
+
+// ---------- OCR ----------
+app.post('/api/ocr', requireAuth, ocrRateLimit, async (req, res) => {
   if (!GLM_API_KEY) {
-    return res.status(503).json({ error: '服务端未配置 GLM_API_KEY，无法调用识别服务' })
+    return res.status(503).json({ error: '服务端未配置 GLM_API_KEY' })
   }
 
   const parsed = parseImageInput(req.body || {})
@@ -243,9 +337,7 @@ app.post('/api/ocr', rateLimit, async (req, res) => {
     })
 
     const text = await upstream.text()
-
     if (!upstream.ok) {
-      // 上游错误信息可能含敏感内容，仅记录到服务端日志
       console.error(`[ocr] GLM 返回 ${upstream.status}: ${text.slice(0, 500)}`)
       return res.status(502).json({
         error: `识别服务返回错误（${upstream.status}）`,
@@ -257,18 +349,28 @@ app.post('/api/ocr', rateLimit, async (req, res) => {
     try {
       data = JSON.parse(text)
     } catch {
-      console.error('[ocr] GLM 返回非 JSON:', text.slice(0, 500))
       return res.status(502).json({ error: '识别服务返回了无法解析的内容' })
     }
 
     const layout = normalizeLayout(data.layout_details, data.data_info)
+    const markdown = data.md_results || ''
+    const title = deriveTitle(markdown)
+
+    const historyId = saveHistory(req.userId, {
+      title,
+      source_image: parsed.dataUri,
+      image_width: data.data_info?.pages?.[0]?.width || 0,
+      image_height: data.data_info?.pages?.[0]?.height || 0,
+      markdown,
+      layout_json: JSON.stringify(layout),
+      tokens_total: data.usage?.total_tokens || 0,
+      elapsed_ms: Date.now() - started,
+    })
 
     res.json({
-      markdown: data.md_results || '',
+      id: historyId,
+      markdown,
       layout,
-      layoutVisualization: Array.isArray(data.layout_visualization)
-        ? data.layout_visualization
-        : [],
       dataInfo: data.data_info || null,
       usage: data.usage || null,
       elapsedMs: Date.now() - started,
@@ -284,12 +386,53 @@ app.post('/api/ocr', rateLimit, async (req, res) => {
   }
 })
 
+// ---------- 历史记录 ----------
+app.get('/api/history', requireAuth, (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 50, 200)
+  const rows = getHistoryList(req.userId, limit)
+  res.json({
+    items: rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      thumbnail: r.source_image,
+      image_width: r.image_width,
+      image_height: r.image_height,
+      tokens_total: r.tokens_total,
+      elapsed_ms: r.elapsed_ms,
+      created_at: r.created_at,
+    })),
+  })
+})
+
+app.get('/api/history/:id', requireAuth, (req, res) => {
+  const row = getHistoryById(req.userId, Number(req.params.id))
+  if (!row) return res.status(404).json({ error: '记录不存在' })
+  res.json({
+    id: row.id,
+    title: row.title,
+    source_image: row.source_image,
+    image_width: row.image_width,
+    image_height: row.image_height,
+    markdown: row.markdown,
+    layout: JSON.parse(row.layout_json || '[]'),
+    tokens_total: row.tokens_total,
+    elapsed_ms: row.elapsed_ms,
+    created_at: row.created_at,
+  })
+})
+
+app.delete('/api/history/:id', requireAuth, (req, res) => {
+  const ok = deleteHistory(req.userId, Number(req.params.id))
+  if (!ok) return res.status(404).json({ error: '记录不存在' })
+  res.json({ ok: true })
+})
+
+// ---------- 404 / 错误 ----------
 app.use((req, res) => {
   res.status(404).json({ error: 'Not Found' })
 })
 
 app.use((err, req, res, next) => {
-  // body 超限等
   if (err?.type === 'entity.too.large') {
     return res.status(413).json({ error: '图片过大，请压缩后再试' })
   }
@@ -297,7 +440,7 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: '服务器内部错误' })
 })
 
-// ---------- 启动（测试环境不监听端口）----------
+// ---------- 启动 ----------
 if (NODE_ENV !== 'test') {
   app.listen(PORT, HOST, () => {
     console.log(`[ocr-page] listening on http://${HOST}:${PORT} (env=${NODE_ENV})`)

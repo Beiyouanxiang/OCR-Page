@@ -16,13 +16,30 @@
   // ---------- DOM ----------
   const $ = (id) => document.getElementById(id)
 
+  // 登录
+  const loginScreen = $('loginScreen')
+  const loginForm = $('loginForm')
+  const loginUsername = $('loginUsername')
+  const loginPassword = $('loginPassword')
+  const loginInvite = $('loginInvite')
+  const inviteField = $('inviteField')
+  const loginError = $('loginError')
+  const authTabs = document.querySelectorAll('.auth-tab')
+  const submitBtn = loginForm.querySelector('button[type="submit"]')
+
+  // 主应用
+  const appScreen = $('appScreen')
+  const currentUser = $('currentUser')
+  const btnLogout = $('btnLogout')
+  const btnHistory = $('btnHistory')
+
+  // 输入
   const dropzone = $('dropzone')
   const dropzoneEmpty = $('dropzoneEmpty')
   const previewWrap = $('previewWrap')
   const previewImg = $('previewImg')
   const fileInput = $('fileInput')
   const workCanvas = $('workCanvas')
-
   const btnPick = $('btnPick')
   const btnClear = $('btnClear')
   const btnOcr = $('btnOcr')
@@ -30,10 +47,8 @@
   const fileMeta = $('fileMeta')
   const inputError = $('inputError')
 
-  const statusDot = $('statusDot')
-  const statusText = $('statusText')
+  // 结果
   const resultMeta = $('resultMeta')
-
   const emptyState = $('emptyState')
   const loadingState = $('loadingState')
   const resultBody = $('resultBody')
@@ -41,19 +56,28 @@
   const rawMarkdown = $('rawMarkdown')
   const layoutStage = $('layoutStage')
   const layoutLegend = $('layoutLegend')
-
+  const blockTip = $('blockTip')
   const btnCopy = $('btnCopy')
   const btnDownloadMd = $('btnDownloadMd')
   const btnDownloadTxt = $('btnDownloadTxt')
 
+  // 历史
+  const historyDrawer = $('historyDrawer')
+  const historyBackdrop = $('historyBackdrop')
+  const btnCloseHistory = $('btnCloseHistory')
+  const historyList = $('historyList')
+
   // ---------- 状态 ----------
   const state = {
+    token: localStorage.getItem('ocr_token') || '',
+    user: null,
+    authMode: 'login', // 'login' | 'register'
     prepared: null, // { dataUri, width, height, size, resized }
     result: null,
     busy: false,
   }
 
-  // marked UMD 在不同版本下挂载形状不同，做兼容
+  // marked UMD 兼容
   const mdParser = (function () {
     const m = window.marked
     if (!m) return null
@@ -63,6 +87,18 @@
   })()
 
   // ---------- 工具 ----------
+  function showToast(msg) {
+    let toast = document.querySelector('.toast')
+    if (!toast) {
+      toast = document.createElement('div')
+      toast.className = 'toast'
+      document.body.appendChild(toast)
+    }
+    toast.textContent = msg
+    toast.classList.add('is-visible')
+    setTimeout(() => toast.classList.remove('is-visible'), 2200)
+  }
+
   function showError(msg) {
     inputError.textContent = msg
     inputError.hidden = false
@@ -73,10 +109,26 @@
     inputError.textContent = ''
   }
 
+  function showLoginError(msg) {
+    loginError.textContent = msg
+    loginError.hidden = false
+  }
+
+  function clearLoginError() {
+    loginError.hidden = true
+    loginError.textContent = ''
+  }
+
   function fmtSize(bytes) {
     if (bytes < 1024) return bytes + ' B'
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
     return (bytes / 1024 / 1024).toFixed(2) + ' MB'
+  }
+
+  function fmtDate(ts) {
+    const d = new Date(ts)
+    const p = (n) => String(n).padStart(2, '0')
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
   }
 
   function setBusy(busy) {
@@ -90,6 +142,122 @@
     }
   }
 
+  // ---------- API ----------
+  async function api(method, path, body) {
+    const opts = {
+      method,
+      headers: {},
+    }
+    if (state.token) {
+      opts.headers.Authorization = `Bearer ${state.token}`
+    }
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json'
+      opts.body = JSON.stringify(body)
+    }
+
+    const res = await fetch(path, opts)
+    const data = await res.json().catch(() => ({}))
+
+    if (res.status === 401) {
+      logout()
+      throw new Error('登录已过期，请重新登录')
+    }
+    if (!res.ok) {
+      throw new Error(data.error || `请求失败（${res.status}）`)
+    }
+    return data
+  }
+
+  // ---------- 认证 ----------
+  function showLogin() {
+    loginScreen.hidden = false
+    appScreen.hidden = true
+    historyDrawer.hidden = true
+    loginUsername.value = ''
+    loginPassword.value = ''
+    loginInvite.value = ''
+    clearLoginError()
+    setAuthMode('login')
+  }
+
+  function showApp() {
+    loginScreen.hidden = true
+    appScreen.hidden = false
+    currentUser.textContent = state.user?.username || '用户'
+  }
+
+  function setAuthMode(mode) {
+    state.authMode = mode
+    authTabs.forEach((t) => t.classList.toggle('is-active', t.dataset.auth === mode))
+    if (mode === 'register') {
+      inviteField.classList.remove('is-hidden')
+      submitBtn.textContent = '注 册'
+    } else {
+      inviteField.classList.add('is-hidden')
+      submitBtn.textContent = '登 录'
+    }
+    clearLoginError()
+  }
+
+  async function initAuth() {
+    if (!state.token) {
+      showLogin()
+      return
+    }
+    try {
+      const data = await api('GET', 'api/auth/me')
+      state.user = data.user
+      showApp()
+      renderHistoryList()
+    } catch (err) {
+      console.warn('[auth] token 无效:', err.message)
+      logout(false)
+      showLogin()
+    }
+  }
+
+  async function handleAuthSubmit(e) {
+    e.preventDefault()
+    clearLoginError()
+
+    const username = loginUsername.value.trim()
+    const password = loginPassword.value
+    const inviteCode = loginInvite.value.trim()
+
+    if (!username || !password) {
+      showLoginError('请填写用户名和密码')
+      return
+    }
+
+    try {
+      let data
+      if (state.authMode === 'login') {
+        data = await api('POST', 'api/auth/login', { username, password })
+      } else {
+        data = await api('POST', 'api/auth/register', { username, password, inviteCode })
+      }
+      state.token = data.token
+      state.user = data.user
+      localStorage.setItem('ocr_token', data.token)
+      showApp()
+      renderHistoryList()
+      showToast(state.authMode === 'login' ? '登录成功' : '注册成功')
+    } catch (err) {
+      showLoginError(err.message)
+    }
+  }
+
+  function logout(notify = true) {
+    state.token = ''
+    state.user = null
+    localStorage.removeItem('ocr_token')
+    clearAll()
+    showLogin()
+    if (notify) showToast('已退出登录')
+  }
+
+  // ---------- 图片处理 ----------
   function fileToDataUri(file) {
     return new Promise((resolve, reject) => {
       const fr = new FileReader()
@@ -112,54 +280,6 @@
     })
   }
 
-  async function copyText(text) {
-    if (navigator.clipboard && window.isSecureContext) {
-      try {
-        await navigator.clipboard.writeText(text)
-        return true
-      } catch (err) {
-        /* 落回 execCommand */
-      }
-    }
-    const ta = document.createElement('textarea')
-    ta.value = text
-    ta.setAttribute('readonly', '')
-    ta.style.position = 'fixed'
-    ta.style.top = '-1000px'
-    ta.style.opacity = '0'
-    document.body.appendChild(ta)
-    ta.select()
-    let ok = false
-    try {
-      ok = document.execCommand('copy')
-    } catch (err) {
-      ok = false
-    }
-    document.body.removeChild(ta)
-    return ok
-  }
-
-  function download(filename, text, mime) {
-    const blob = new Blob([text], { type: mime + ';charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
-  }
-
-  function stamp() {
-    const d = new Date()
-    const p = (n) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(
-      d.getMinutes()
-    )}${p(d.getSeconds())}`
-  }
-
-  // ---------- 图片预处理 ----------
   async function prepareImage(file) {
     if (!file) throw new Error('没有选择文件')
     if (!/^image\//.test(file.type)) throw new Error('请选择图片文件')
@@ -250,12 +370,62 @@
     rawMarkdown.textContent = ''
     layoutStage.innerHTML = '<p class="empty-sub">识别后将显示版面标注</p>'
     layoutLegend.hidden = true
+    blockTip.hidden = true
+    blockTip.textContent = ''
     resultMeta.textContent = ''
     btnCopy.disabled = true
     btnDownloadMd.disabled = true
     btnDownloadTxt.disabled = true
     resultBody.hidden = true
     if (!state.busy) emptyState.hidden = false
+  }
+
+  function getImageFromClipboard(e) {
+    const cd = e.clipboardData
+    if (!cd) return null
+
+    // 1. 优先从 files 读取（多数截图工具）
+    if (cd.files && cd.files.length) {
+      for (const f of cd.files) {
+        if (/^image\//.test(f.type)) return f
+      }
+    }
+
+    // 2. 从 items 读取
+    if (cd.items) {
+      for (const item of cd.items) {
+        if (item.kind === 'file' && /^image\//.test(item.type)) {
+          return item.getAsFile()
+        }
+      }
+    }
+
+    // 3. text/html 里可能内嵌了 base64 图片
+    const html = cd.getData('text/html')
+    if (html) {
+      const m = html.match(/<img[^>]+src="(data:image\/[^;]+;base64,[^"]+)"/)
+      if (m) {
+        try {
+          return dataUriToFile(m[1])
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+
+    return null
+  }
+
+  function dataUriToFile(dataUri) {
+    const m = dataUri.match(/^data:(.+);base64,(.*)$/)
+    if (!m) throw new Error('Invalid data URI')
+    const byteString = atob(m[2])
+    const mime = m[1]
+    const ab = new ArrayBuffer(byteString.length)
+    const ia = new Uint8Array(ab)
+    for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i)
+    const ext = mime.split('/')[1] || 'png'
+    return new File([ab], `pasted-${Date.now()}.${ext}`, { type: mime })
   }
 
   // ---------- 识别 ----------
@@ -265,22 +435,13 @@
     setBusy(true)
 
     try {
-      const resp = await fetch('api/ocr', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: state.prepared.dataUri }),
-      })
-
-      const data = await resp.json().catch(() => ({}))
-      if (!resp.ok) {
-        throw new Error(data.error || `识别失败（HTTP ${resp.status}）`)
-      }
-
+      const data = await api('POST', 'api/ocr', { image: state.prepared.dataUri })
       state.result = data
       renderResult(data)
       setBusy(false)
       resultBody.hidden = false
       emptyState.hidden = true
+      renderHistoryList()
     } catch (err) {
       setBusy(false)
       emptyState.hidden = false
@@ -288,26 +449,21 @@
     }
   }
 
-  function renderResult(data) {
+  function renderResult(data, opts = {}) {
     const md = data.markdown || ''
 
-    // 排版预览
     if (!md.trim()) {
       rendered.innerHTML = '<p class="empty-sub">这张图片没有识别到文字内容</p>'
     } else if (mdParser) {
       const html = mdParser.parse(md, { gfm: true, breaks: false })
-      rendered.innerHTML = window.DOMPurify
-        ? window.DOMPurify.sanitize(html)
-        : html
+      rendered.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(html) : html
     } else {
       rendered.innerHTML = ''
       rendered.textContent = md
     }
 
-    // Markdown 源码
     rawMarkdown.textContent = md
 
-    // 元信息
     const bits = []
     if (data.usage && typeof data.usage.total_tokens === 'number') {
       bits.push(`tokens ${data.usage.total_tokens}`)
@@ -319,8 +475,8 @@
     if (blocks) bits.push(`${blocks} 个版面元素`)
     resultMeta.textContent = bits.join(' · ')
 
-    // 版面标注
-    renderLayout(data.layout || [])
+    const sourceImage = opts.source_image || (state.prepared && state.prepared.dataUri)
+    renderLayout(data.layout || [], sourceImage)
 
     const hasContent = md.trim().length > 0
     btnCopy.disabled = !hasContent
@@ -328,11 +484,13 @@
     btnDownloadTxt.disabled = !hasContent
   }
 
-  function renderLayout(pages) {
+  function renderLayout(pages, sourceImage) {
     layoutStage.innerHTML = ''
+    blockTip.hidden = true
+    blockTip.textContent = ''
 
     const blocks = (pages && pages[0]) || []
-    if (!state.prepared || !blocks.length) {
+    if (!sourceImage || !blocks.length) {
       layoutStage.innerHTML = '<p class="empty-sub">本次识别没有返回版面元素</p>'
       layoutLegend.hidden = true
       return
@@ -341,13 +499,9 @@
     layoutLegend.hidden = false
 
     const img = document.createElement('img')
-    img.src = state.prepared.dataUri
+    img.src = sourceImage
     img.alt = '版面标注原图'
     layoutStage.appendChild(img)
-
-    const tip = document.createElement('div')
-    tip.className = 'block-tip'
-    tip.textContent = '点击任意色块查看该区域识别到的内容'
 
     blocks.forEach((b) => {
       if (!b || !Array.isArray(b.bbox) || b.bbox.length !== 4) return
@@ -367,17 +521,170 @@
         )
         box.classList.add('is-active')
         const label = LABEL_TEXT[b.label] || b.label || '元素'
-        tip.textContent = `【${label}】\n${b.content || '(无内容)'}`
+        blockTip.textContent = `【${label}】\n${b.content || '(无内容)'}`
+        blockTip.hidden = false
       })
 
       layoutStage.appendChild(box)
     })
+  }
 
-    // tip 放在 stage 之后（stage 内绝对定位会跟着滚动）
-    layoutStage.insertAdjacentElement('afterend', tip)
+  // ---------- 历史记录 ----------
+  async function renderHistoryList() {
+    if (!state.user) return
+    try {
+      const data = await api('GET', 'api/history?limit=100')
+      const items = data.items || []
+
+      if (!items.length) {
+        historyList.innerHTML = '<div class="empty-history">暂无识别记录</div>'
+        return
+      }
+
+      historyList.innerHTML = ''
+      items.forEach((item) => {
+        const el = document.createElement('div')
+        el.className = 'history-item'
+        el.innerHTML = `
+          <img class="history-thumb" src="${escapeHtml(item.thumbnail)}" alt="" />
+          <div class="history-body">
+            <p class="history-title">${escapeHtml(item.title || '未识别到标题')}</p>
+            <p class="history-meta">${fmtDate(item.created_at)} · ${item.tokens_total || 0} tokens · ${
+          item.image_width
+        }×${item.image_height}</p>
+          </div>
+          <button class="history-delete" data-id="${item.id}" title="删除">×</button>
+        `
+        el.addEventListener('click', (e) => {
+          if (e.target.classList.contains('history-delete')) {
+            e.stopPropagation()
+            deleteHistoryItem(item.id)
+            return
+          }
+          loadHistoryItem(item.id)
+        })
+        historyList.appendChild(el)
+      })
+    } catch (err) {
+      console.error('[history] 加载失败:', err)
+      historyList.innerHTML = '<div class="empty-history">加载失败</div>'
+    }
+  }
+
+  async function loadHistoryItem(id) {
+    try {
+      const data = await api('GET', `api/history/${id}`)
+      state.prepared = {
+        dataUri: data.source_image,
+        width: data.image_width,
+        height: data.image_height,
+        size: 0,
+        resized: false,
+      }
+      previewImg.src = data.source_image
+      previewWrap.hidden = false
+      dropzoneEmpty.hidden = true
+      dropzone.classList.add('has-image')
+      fileMeta.hidden = false
+      fileMeta.textContent = `${data.image_width}×${data.image_height} · 来自历史记录`
+      btnClear.disabled = false
+
+      state.result = data
+      renderResult(data, { source_image: data.source_image })
+      resultBody.hidden = false
+      emptyState.hidden = true
+      closeHistoryDrawer()
+    } catch (err) {
+      showToast(err.message || '加载失败')
+    }
+  }
+
+  async function deleteHistoryItem(id) {
+    if (!confirm('确定删除这条记录？')) return
+    try {
+      await api('DELETE', `api/history/${id}`)
+      renderHistoryList()
+      showToast('已删除')
+    } catch (err) {
+      showToast(err.message || '删除失败')
+    }
+  }
+
+  function openHistoryDrawer() {
+    historyDrawer.hidden = false
+    renderHistoryList()
+  }
+
+  function closeHistoryDrawer() {
+    historyDrawer.hidden = true
+  }
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  }
+
+  // ---------- 复制/下载 ----------
+  async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(text)
+        return true
+      } catch (err) {
+        /* fallback */
+      }
+    }
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.setAttribute('readonly', '')
+    ta.style.position = 'fixed'
+    ta.style.top = '-1000px'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    let ok = false
+    try {
+      ok = document.execCommand('copy')
+    } catch (err) {
+      ok = false
+    }
+    document.body.removeChild(ta)
+    return ok
+  }
+
+  function download(filename, text, mime) {
+    const blob = new Blob([text], { type: mime + ';charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  function stamp() {
+    const d = new Date()
+    const p = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(
+      d.getMinutes()
+    )}${p(d.getSeconds())}`
   }
 
   // ---------- 事件绑定 ----------
+  authTabs.forEach((tab) => {
+    tab.addEventListener('click', () => setAuthMode(tab.dataset.auth))
+  })
+  loginForm.addEventListener('submit', handleAuthSubmit)
+  btnLogout.addEventListener('click', () => logout())
+  btnHistory.addEventListener('click', openHistoryDrawer)
+  btnCloseHistory.addEventListener('click', closeHistoryDrawer)
+  historyBackdrop.addEventListener('click', closeHistoryDrawer)
+
   dropzone.addEventListener('click', () => {
     if (!state.prepared) fileInput.click()
   })
@@ -407,22 +714,18 @@
     if (file) handleFile(file)
   })
 
-  // 全局粘贴：Ctrl/⌘ + V 直接粘截图
-  document.addEventListener('paste', (e) => {
-    if (state.busy) return
-    const items = (e.clipboardData && e.clipboardData.items) || []
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i]
-      if (it.kind === 'file' && /^image\//.test(it.type)) {
-        const file = it.getAsFile()
-        if (file) {
-          e.preventDefault()
-          handleFile(file)
-          return
-        }
-      }
+  // 粘贴：同时绑定 document 和 dropzone，尽量兼容不同浏览器
+  function onPaste(e) {
+    if (appScreen.hidden || state.busy) return
+    const file = getImageFromClipboard(e)
+    if (file) {
+      e.preventDefault()
+      handleFile(file)
     }
-  })
+  }
+
+  document.addEventListener('paste', onPaste)
+  dropzone.addEventListener('paste', onPaste)
 
   fileInput.addEventListener('change', () => {
     const file = fileInput.files && fileInput.files[0]
@@ -433,7 +736,6 @@
   btnClear.addEventListener('click', clearAll)
   btnOcr.addEventListener('click', runOcr)
 
-  // Tab 切换
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), (tab) => {
     tab.addEventListener('click', () => {
       Array.prototype.forEach.call(document.querySelectorAll('.tab'), (t) =>
@@ -448,16 +750,11 @@
     })
   })
 
-  // 复制 / 下载
   btnCopy.addEventListener('click', async () => {
     const md = (state.result && state.result.markdown) || ''
     if (!md) return
-    const old = btnCopy.textContent
     const ok = await copyText(md)
-    btnCopy.textContent = ok ? '已复制' : '复制失败'
-    setTimeout(() => {
-      btnCopy.textContent = old
-    }, 1500)
+    showToast(ok ? '已复制到剪贴板' : '复制失败')
   })
 
   btnDownloadMd.addEventListener('click', () => {
@@ -471,20 +768,5 @@
   })
 
   // ---------- 启动 ----------
-  ;(async function checkStatus() {
-    try {
-      const r = await fetch('api/info')
-      const d = await r.json()
-      if (r.ok && d.status === 'ready') {
-        statusDot.classList.add('ok')
-        statusText.textContent = `就绪 · ${d.model}`
-      } else {
-        statusDot.classList.add('err')
-        statusText.textContent = '未配置 API Key'
-      }
-    } catch (err) {
-      statusDot.classList.add('err')
-      statusText.textContent = '服务不可用'
-    }
-  })()
+  initAuth()
 })()
