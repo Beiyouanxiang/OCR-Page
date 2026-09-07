@@ -209,7 +209,7 @@ app.get('/api/info', (req, res) => {
     features: {
       layout_parsing: true,
       layout_boxes: true,
-      camera: true,
+      camera: false,
     },
   })
 })
