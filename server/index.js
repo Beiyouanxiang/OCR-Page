@@ -354,7 +354,7 @@ app.post('/api/ocr', requireAuth, ocrRateLimit, async (req, res) => {
     const markdown = data.md_results || ''
     const title = deriveTitle(markdown)
 
-    const historyId = saveHistory(req.userId, {
+    const historyId = await saveHistory(req.userId, {
       title,
       source_image: parsed.dataUri,
       image_width: data.data_info?.pages?.[0]?.width || 0,
@@ -387,18 +387,21 @@ app.post('/api/ocr', requireAuth, ocrRateLimit, async (req, res) => {
 // ---------- 历史记录 ----------
 app.get('/api/history', requireAuth, (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 50, 200)
-  const rows = getHistoryList(req.userId, limit)
+  const offset = Math.max(Number(req.query.offset) || 0, 0)
+  const rows = getHistoryList(req.userId, limit, offset)
   res.json({
     items: rows.map((r) => ({
       id: r.id,
       title: r.title,
-      thumbnail: r.source_image,
+      thumbnail: r.thumbnail || '',
       image_width: r.image_width,
       image_height: r.image_height,
       tokens_total: r.tokens_total,
       elapsed_ms: r.elapsed_ms,
       created_at: r.created_at,
     })),
+    limit,
+    offset,
   })
 })
 

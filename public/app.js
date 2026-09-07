@@ -44,6 +44,7 @@
   const btnClear = $('btnClear')
   const btnOcr = $('btnOcr')
   const autoRun = $('autoRun')
+  const keepOriginalSize = $('keepOriginalSize')
   const fileMeta = $('fileMeta')
   const inputError = $('inputError')
 
@@ -54,10 +55,12 @@
   const resultBody = $('resultBody')
   const rendered = $('rendered')
   const rawMarkdown = $('rawMarkdown')
+  const plainText = $('plainText')
   const layoutStage = $('layoutStage')
   const layoutLegend = $('layoutLegend')
   const blockTip = $('blockTip')
   const btnCopy = $('btnCopy')
+  const btnCopyPlain = $('btnCopyPlain')
   const btnDownloadMd = $('btnDownloadMd')
   const btnDownloadTxt = $('btnDownloadTxt')
 
@@ -66,6 +69,8 @@
   const historyBackdrop = $('historyBackdrop')
   const btnCloseHistory = $('btnCloseHistory')
   const historyList = $('historyList')
+  const historyFoot = $('historyFoot')
+  const btnLoadMore = $('btnLoadMore')
 
   // ---------- 状态 ----------
   const state = {
@@ -75,6 +80,8 @@
     prepared: null, // { dataUri, width, height, size, resized }
     result: null,
     busy: false,
+    historyOffset: 0,
+    historyHasMore: true,
   }
 
   // marked UMD 兼容
@@ -135,6 +142,11 @@
     state.busy = busy
     btnOcr.disabled = busy || !state.prepared
     btnOcr.textContent = busy ? '识别中…' : '开始识别'
+    btnClear.disabled = busy || !state.prepared
+    btnPick.disabled = busy
+    fileInput.disabled = busy
+    btnHistory.disabled = busy
+    dropzone.classList.toggle('is-busy', busy)
     loadingState.hidden = !busy
     if (busy) {
       emptyState.hidden = true
@@ -307,7 +319,8 @@
       const h0 = img.naturalHeight || 0
       if (!w0 || !h0) throw new Error('无法获取图片尺寸')
 
-      const needResize = Math.max(w0, h0) > MAX_SIDE
+      const maxSide = keepOriginalSize.checked ? 8192 : MAX_SIDE
+      const needResize = Math.max(w0, h0) > maxSide
       const needCompress = file.size > MAX_BYTES
 
       if (!needResize && !needCompress) {
@@ -315,7 +328,7 @@
         return { dataUri, width: w0, height: h0, size: file.size, resized: false }
       }
 
-      const scale = needResize ? MAX_SIDE / Math.max(w0, h0) : 1
+      const scale = needResize ? maxSide / Math.max(w0, h0) : 1
       const w = Math.max(1, Math.round(w0 * scale))
       const h = Math.max(1, Math.round(h0 * scale))
 
@@ -384,13 +397,15 @@
   function clearResult() {
     state.result = null
     rendered.innerHTML = ''
-    rawMarkdown.textContent = ''
+    rawMarkdown.value = ''
+    plainText.textContent = ''
     layoutStage.innerHTML = '<p class="empty-sub">识别后将显示版面标注</p>'
     layoutLegend.hidden = true
     blockTip.hidden = true
     blockTip.textContent = ''
     resultMeta.textContent = ''
     btnCopy.disabled = true
+    btnCopyPlain.disabled = true
     btnDownloadMd.disabled = true
     btnDownloadTxt.disabled = true
     resultBody.hidden = true
@@ -480,13 +495,22 @@
   }
 
   // ---------- 识别 ----------
+  let ocrGen = 0
+
   async function runOcr() {
     if (!state.prepared || state.busy) return
+    const snapshot = state.prepared
+    const gen = ++ocrGen
     clearError()
     setBusy(true)
 
     try {
-      const data = await api('POST', 'api/ocr', { image: state.prepared.dataUri })
+      const data = await api('POST', 'api/ocr', { image: snapshot.dataUri })
+      // 如果识别过程中用户换了图，丢弃过期响应
+      if (state.prepared !== snapshot || gen !== ocrGen) {
+        console.log('[ocr] 响应已过期，丢弃')
+        return
+      }
       state.result = data
       renderResult(data)
       setBusy(false)
@@ -495,8 +519,10 @@
       renderHistoryList()
     } catch (err) {
       setBusy(false)
-      emptyState.hidden = false
-      showError(err.message || '识别失败')
+      if (gen === ocrGen) {
+        emptyState.hidden = false
+        showError(err.message || '识别失败')
+      }
     }
   }
 
@@ -507,13 +533,20 @@
       rendered.innerHTML = '<p class="empty-sub">这张图片没有识别到文字内容</p>'
     } else if (mdParser) {
       const html = mdParser.parse(md, { gfm: true, breaks: false })
-      rendered.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(html) : html
+      if (window.DOMPurify) {
+        rendered.innerHTML = window.DOMPurify.sanitize(html)
+      } else {
+        // DOMPurify 缺失时不渲染原始 HTML，退回到纯文本，避免 XSS
+        rendered.innerHTML = ''
+        rendered.textContent = md
+      }
     } else {
       rendered.innerHTML = ''
       rendered.textContent = md
     }
 
-    rawMarkdown.textContent = md
+    rawMarkdown.value = md
+    plainText.textContent = markdownToPlain(md)
 
     const bits = []
     if (data.usage && typeof data.usage.total_tokens === 'number') {
@@ -531,6 +564,7 @@
 
     const hasContent = md.trim().length > 0
     btnCopy.disabled = !hasContent
+    btnCopyPlain.disabled = !hasContent
     btnDownloadMd.disabled = !hasContent
     btnDownloadTxt.disabled = !hasContent
   }
@@ -581,45 +615,82 @@
   }
 
   // ---------- 历史记录 ----------
-  async function renderHistoryList() {
+  const HISTORY_PAGE_SIZE = 20
+
+  function createHistoryItem(item) {
+    const el = document.createElement('div')
+    el.className = 'history-item'
+    const thumb = item.thumbnail
+      ? `<img class="history-thumb" src="${escapeHtml(item.thumbnail)}" alt="" loading="lazy" />`
+      : `<div class="history-thumb" style="background:var(--bg);display:flex;align-items:center;justify-content:center;color:var(--text-dim);font-size:11px">无图</div>`
+    el.innerHTML = `
+      ${thumb}
+      <div class="history-body">
+        <p class="history-title">${escapeHtml(item.title || '未识别到标题')}</p>
+        <p class="history-meta">${fmtDate(item.created_at)} · ${item.tokens_total || 0} tokens · ${
+      item.image_width
+    }×${item.image_height}</p>
+      </div>
+      <button class="history-delete" data-id="${item.id}" title="删除">×</button>
+    `
+    el.addEventListener('click', (e) => {
+      if (state.busy) {
+        showToast('识别中，请稍后再打开历史')
+        return
+      }
+      if (e.target.classList.contains('history-delete')) {
+        e.stopPropagation()
+        deleteHistoryItem(item.id)
+        return
+      }
+      loadHistoryItem(item.id)
+    })
+    return el
+  }
+
+  async function renderHistoryList(reset = true) {
     if (!state.user) return
+    if (reset) {
+      state.historyOffset = 0
+      state.historyHasMore = true
+      historyList.innerHTML = '<div class="empty-history">加载中…</div>'
+    }
     try {
-      const data = await api('GET', 'api/history?limit=100')
+      const data = await api(
+        'GET',
+        `api/history?limit=${HISTORY_PAGE_SIZE}&offset=${state.historyOffset}`
+      )
       const items = data.items || []
 
-      if (!items.length) {
+      if (reset) {
+        historyList.innerHTML = ''
+      }
+
+      if (!items.length && state.historyOffset === 0) {
         historyList.innerHTML = '<div class="empty-history">暂无识别记录</div>'
+        historyFoot.hidden = true
         return
       }
 
-      historyList.innerHTML = ''
       items.forEach((item) => {
-        const el = document.createElement('div')
-        el.className = 'history-item'
-        el.innerHTML = `
-          <img class="history-thumb" src="${escapeHtml(item.thumbnail)}" alt="" />
-          <div class="history-body">
-            <p class="history-title">${escapeHtml(item.title || '未识别到标题')}</p>
-            <p class="history-meta">${fmtDate(item.created_at)} · ${item.tokens_total || 0} tokens · ${
-          item.image_width
-        }×${item.image_height}</p>
-          </div>
-          <button class="history-delete" data-id="${item.id}" title="删除">×</button>
-        `
-        el.addEventListener('click', (e) => {
-          if (e.target.classList.contains('history-delete')) {
-            e.stopPropagation()
-            deleteHistoryItem(item.id)
-            return
-          }
-          loadHistoryItem(item.id)
-        })
-        historyList.appendChild(el)
+        historyList.appendChild(createHistoryItem(item))
       })
+
+      state.historyHasMore = items.length === HISTORY_PAGE_SIZE
+      state.historyOffset += items.length
+      historyFoot.hidden = !state.historyHasMore
     } catch (err) {
       console.error('[history] 加载失败:', err)
-      historyList.innerHTML = '<div class="empty-history">加载失败</div>'
+      if (reset) {
+        historyList.innerHTML = '<div class="empty-history">加载失败</div>'
+      }
+      historyFoot.hidden = true
     }
+  }
+
+  async function loadMoreHistory() {
+    if (!state.historyHasMore) return
+    await renderHistoryList(false)
   }
 
   async function loadHistoryItem(id) {
@@ -662,8 +733,12 @@
   }
 
   function openHistoryDrawer() {
+    if (state.busy) {
+      showToast('识别中，请稍后再打开历史')
+      return
+    }
     historyDrawer.hidden = false
-    renderHistoryList()
+    renderHistoryList(true)
   }
 
   function closeHistoryDrawer() {
@@ -676,6 +751,24 @@
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
+  }
+
+  // 将 Markdown 简单清洗为纯文本（用于复制和 .txt 下载）
+  function markdownToPlain(md) {
+    return String(md || '')
+      .replace(/^#+\s*/gm, '') // 标题标记
+      .replace(/\*\*|__/g, '') // 加粗
+      .replace(/`/g, '') // 行内代码
+      .replace(/^\s*[-*+]\s+/gm, '') // 列表标记
+      .replace(/^\s*\d+\.\s+/gm, '') // 有序列表
+      .replace(/^\s*>\s?/gm, '') // 引用
+      .replace(/^\s*[-=]{3,}\s*$/gm, '') // 分隔线
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // 链接 [text](url)
+      .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1') // 图片
+      .replace(/^\|?\s*(.+?)\s*\|?$/gm, (m, c) => c.replace(/\|/g, ' ')) // 表格行转空格分隔
+      .replace(/\|\|?/g, ' ') // 剩余表格分隔符
+      .replace(/\n{3,}/g, '\n\n') // 多余空行
+      .trim()
   }
 
   // ---------- 复制/下载 ----------
@@ -735,12 +828,13 @@
   btnHistory.addEventListener('click', openHistoryDrawer)
   btnCloseHistory.addEventListener('click', closeHistoryDrawer)
   historyBackdrop.addEventListener('click', closeHistoryDrawer)
+  btnLoadMore.addEventListener('click', loadMoreHistory)
 
   dropzone.addEventListener('click', () => {
-    if (!state.prepared) fileInput.click()
+    if (!state.prepared && !state.busy) fileInput.click()
   })
   dropzone.addEventListener('keydown', (e) => {
-    if ((e.key === 'Enter' || e.key === ' ') && !state.prepared) {
+    if ((e.key === 'Enter' || e.key === ' ') && !state.prepared && !state.busy) {
       e.preventDefault()
       fileInput.click()
     }
@@ -748,6 +842,7 @@
 
   ;['dragenter', 'dragover'].forEach((ev) => {
     dropzone.addEventListener(ev, (e) => {
+      if (state.busy) return
       e.preventDefault()
       dropzone.classList.add('is-dragover')
     })
@@ -759,6 +854,7 @@
     })
   })
   dropzone.addEventListener('drop', (e) => {
+    if (state.busy) return
     const dt = e.dataTransfer
     if (!dt) return
     const file = dt.files && dt.files[0]
@@ -802,20 +898,31 @@
   })
 
   btnCopy.addEventListener('click', async () => {
-    const md = (state.result && state.result.markdown) || ''
+    const md = rawMarkdown.value || ''
     if (!md) return
     const ok = await copyText(md)
-    showToast(ok ? '已复制到剪贴板' : '复制失败')
+    showToast(ok ? '已复制 Markdown' : '复制失败')
+  })
+
+  rawMarkdown.addEventListener('input', () => {
+    plainText.textContent = markdownToPlain(rawMarkdown.value || '')
+  })
+
+  btnCopyPlain.addEventListener('click', async () => {
+    const text = markdownToPlain(rawMarkdown.value || '')
+    if (!text) return
+    const ok = await copyText(text)
+    showToast(ok ? '已复制纯文本' : '复制失败')
   })
 
   btnDownloadMd.addEventListener('click', () => {
-    const md = (state.result && state.result.markdown) || ''
+    const md = rawMarkdown.value || ''
     if (md) download(`ocr-${stamp()}.md`, md, 'text/markdown')
   })
 
   btnDownloadTxt.addEventListener('click', () => {
-    const md = (state.result && state.result.markdown) || ''
-    if (md) download(`ocr-${stamp()}.txt`, md, 'text/plain')
+    const text = markdownToPlain(rawMarkdown.value || '')
+    if (text) download(`ocr-${stamp()}.txt`, text, 'text/plain')
   })
 
   // ---------- 启动 ----------

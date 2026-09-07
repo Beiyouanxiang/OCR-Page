@@ -2,6 +2,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
+import { Jimp } from 'jimp'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = path.join(__dirname, '..', 'data')
@@ -37,6 +38,7 @@ db.exec(`
     user_id INTEGER NOT NULL,
     title TEXT,
     source_image TEXT NOT NULL,        -- 用于版面标注的原图（缩放到 MAX_STORE 后的 data URI）
+    thumbnail TEXT,                    -- 列表展示用的小图（JPEG base64）
     image_width INTEGER,
     image_height INTEGER,
     markdown TEXT NOT NULL,
@@ -52,6 +54,49 @@ db.exec(`
 `)
 
 ensureMode(DATA_DIR, DB_FILE)
+
+// ---------- schema 迁移：thumbnail 字段 ----------
+function columnExists(table, column) {
+  const info = db.prepare(`PRAGMA table_info(${table})`).all()
+  return info.some((c) => c.name === column)
+}
+
+if (!columnExists('ocr_history', 'thumbnail')) {
+  console.log('[db] migrate: add thumbnail column')
+  db.exec('ALTER TABLE ocr_history ADD COLUMN thumbnail TEXT')
+}
+
+// ---------- 缩略图 ----------
+async function makeThumbnail(dataUri, maxSide = 240) {
+  try {
+    const m = String(dataUri).match(/^data:([^;,]+);base64,(.*)$/)
+    if (!m) return ''
+    const buffer = Buffer.from(m[2].replace(/\s+/g, ''), 'base64')
+    if (!buffer.length) return ''
+    const image = await Jimp.read(buffer)
+    if (image.bitmap.width > maxSide || image.bitmap.height > maxSide) {
+      // jimp 1.x 新 API：scaleToFit 接受对象参数
+      image.scaleToFit({ w: maxSide, h: maxSide })
+    }
+    return await image.getBase64('image/jpeg')
+  } catch (err) {
+    console.warn('[db] thumbnail failed:', err.message)
+    return ''
+  }
+}
+
+// backfill 老数据（没有 thumbnail 的记录）
+async function backfillThumbnails() {
+  const rows = db.prepare('SELECT id, source_image FROM ocr_history WHERE thumbnail IS NULL OR thumbnail = \'\'').all()
+  if (!rows.length) return
+  console.log(`[db] backfill ${rows.length} thumbnails`)
+  const update = db.prepare('UPDATE ocr_history SET thumbnail = ? WHERE id = ?')
+  for (const row of rows) {
+    const thumb = await makeThumbnail(row.source_image)
+    if (thumb) update.run(thumb, row.id)
+  }
+}
+backfillThumbnails().catch((err) => console.error('[db] backfill error:', err))
 
 // ---------- 用户 ----------
 export function createUser(username, passwordHash) {
@@ -72,16 +117,18 @@ export function findUserById(id) {
 }
 
 // ---------- OCR 历史 ----------
-export function saveHistory(userId, record) {
+export async function saveHistory(userId, record) {
+  const thumbnail = await makeThumbnail(record.source_image)
   const stmt = db.prepare(
     `INSERT INTO ocr_history
-      (user_id, title, source_image, image_width, image_height, markdown, layout_json, tokens_total, elapsed_ms, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      (user_id, title, source_image, thumbnail, image_width, image_height, markdown, layout_json, tokens_total, elapsed_ms, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   )
   const info = stmt.run(
     userId,
     record.title || '',
     record.source_image,
+    thumbnail,
     record.image_width || 0,
     record.image_height || 0,
     record.markdown,
@@ -93,16 +140,16 @@ export function saveHistory(userId, record) {
   return info.lastInsertRowid
 }
 
-export function getHistoryList(userId, limit = 100) {
+export function getHistoryList(userId, limit = 50, offset = 0) {
   return db
     .prepare(
-      `SELECT id, title, source_image, image_width, image_height, tokens_total, elapsed_ms, created_at
+      `SELECT id, title, thumbnail, image_width, image_height, tokens_total, elapsed_ms, created_at
        FROM ocr_history
        WHERE user_id = ?
        ORDER BY created_at DESC
-       LIMIT ?`
+       LIMIT ? OFFSET ?`
     )
-    .all(userId, limit)
+    .all(userId, limit, offset)
 }
 
 export function getHistoryById(userId, id) {

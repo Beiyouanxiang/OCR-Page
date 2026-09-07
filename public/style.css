@@ -392,6 +392,11 @@ body {
   background: var(--surface);
 }
 
+.dropzone.is-busy {
+  pointer-events: none;
+  opacity: 0.72;
+}
+
 .dropzone-empty {
   text-align: center;
   color: var(--text-dim);
@@ -452,7 +457,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 14px;
+  margin-top: 8px;
   font-size: 13px;
   color: var(--text-dim);
   cursor: pointer;
@@ -698,6 +703,14 @@ body {
   margin: 0;
   max-height: 640px;
   overflow: auto;
+  width: 100%;
+  resize: vertical;
+}
+
+.raw-markdown:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.12);
 }
 
 /* ---------- 版面标注 ---------- */
@@ -938,6 +951,13 @@ body {
   text-align: center;
   padding: 40px 16px;
   color: var(--text-dim);
+}
+
+.history-foot {
+  padding: 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: center;
 }
 
 /* ---------- toast ---------- */
