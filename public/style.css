@@ -46,6 +46,10 @@ body {
   min-height: 100vh;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .btn {
   appearance: none;
   border: 1px solid var(--border-strong);
