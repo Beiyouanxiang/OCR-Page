@@ -267,14 +267,31 @@
     })
   }
 
-  function loadImageFromFile(file) {
+  async function loadImageFromFile(file) {
+    const url = URL.createObjectURL(file)
     return new Promise((resolve, reject) => {
-      const url = URL.createObjectURL(file)
       const img = new Image()
       img.onload = () => resolve({ img, url })
-      img.onerror = () => {
+      img.onerror = async () => {
         URL.revokeObjectURL(url)
-        reject(new Error('无法解析该图片文件'))
+        try {
+          // 某些剪贴板图片格式（如 Windows DIB、无扩展名图片）
+          // HTMLImageElement 无法解码，但 ImageBitmap 通常可以。
+          // 用 canvas 重绘一次，转成浏览器一定认识的 PNG。
+          const bmp = await createImageBitmap(file)
+          const c = document.createElement('canvas')
+          c.width = bmp.width
+          c.height = bmp.height
+          c.getContext('2d').drawImage(bmp, 0, 0)
+          bmp.close && bmp.close()
+          const dataUri = c.toDataURL('image/png')
+          const img2 = new Image()
+          img2.onload = () => resolve({ img: img2, url: dataUri })
+          img2.onerror = () => reject(new Error('无法解析该图片文件'))
+          img2.src = dataUri
+        } catch (err) {
+          reject(new Error('无法解析该图片文件'))
+        }
       }
       img.src = url
     })
@@ -380,7 +397,7 @@
     if (!state.busy) emptyState.hidden = false
   }
 
-  function getImageFromClipboard(e) {
+  async function getImageFromClipboard(e) {
     const cd = e.clipboardData
     if (!cd) return null
 
@@ -395,18 +412,43 @@
     if (cd.items) {
       for (const item of cd.items) {
         if (item.kind === 'file' && /^image\//.test(item.type)) {
-          return item.getAsFile()
+          const file = item.getAsFile()
+          if (file) return file
         }
       }
     }
 
-    // 3. text/html 里可能内嵌了 base64 图片
+    // 3. text/html 里可能内嵌了图片
     const html = cd.getData('text/html')
     if (html) {
-      const m = html.match(/<img[^>]+src="(data:image\/[^;]+;base64,[^"]+)"/)
+      // 3a. base64 图片
+      const m = html.match(/<img[^>]+src="(data:image\/[^;]+;base64,[^"]+)"/i)
       if (m) {
         try {
           return dataUriToFile(m[1])
+        } catch {
+          /* ignore */
+        }
+      }
+
+      // 3b. 网络图片或 blob URL（部分网页/应用复制的是 <img src="https://...">）
+      const m2 = html.match(/<img[^>]+src="(https?:\/\/[^"]+|blob:[^"]+)"/i)
+      if (m2) {
+        try {
+          return await urlToFile(m2[1])
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+
+    // 4. 纯文本里只有 URL
+    const plain = cd.getData('text/plain')
+    if (plain) {
+      const url = plain.trim()
+      if (/^https?:\/\/.+/i.test(url)) {
+        try {
+          return await urlToFile(url)
         } catch {
           /* ignore */
         }
@@ -426,6 +468,15 @@
     for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i)
     const ext = mime.split('/')[1] || 'png'
     return new File([ab], `pasted-${Date.now()}.${ext}`, { type: mime })
+  }
+
+  async function urlToFile(url) {
+    const resp = await fetch(url, { mode: 'cors' })
+    if (!resp.ok) throw new Error('无法下载图片')
+    const blob = await resp.blob()
+    if (!/^image\//.test(blob.type)) throw new Error('剪贴板 URL 不是图片')
+    const ext = blob.type.split('/')[1] || 'png'
+    return new File([blob], `pasted-${Date.now()}.${ext}`, { type: blob.type })
   }
 
   // ---------- 识别 ----------
@@ -715,9 +766,9 @@
   })
 
   // 粘贴：同时绑定 document 和 dropzone，尽量兼容不同浏览器
-  function onPaste(e) {
+  async function onPaste(e) {
     if (appScreen.hidden || state.busy) return
-    const file = getImageFromClipboard(e)
+    const file = await getImageFromClipboard(e)
     if (file) {
       e.preventDefault()
       handleFile(file)
