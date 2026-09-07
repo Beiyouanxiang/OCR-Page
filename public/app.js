@@ -24,7 +24,6 @@
   const workCanvas = $('workCanvas')
 
   const btnPick = $('btnPick')
-  const btnCamera = $('btnCamera')
   const btnClear = $('btnClear')
   const btnOcr = $('btnOcr')
   const autoRun = $('autoRun')
@@ -47,20 +46,11 @@
   const btnDownloadMd = $('btnDownloadMd')
   const btnDownloadTxt = $('btnDownloadTxt')
 
-  const cameraModal = $('cameraModal')
-  const cameraVideo = $('cameraVideo')
-  const cameraError = $('cameraError')
-  const btnShoot = $('btnShoot')
-  const btnSwitchCam = $('btnSwitchCam')
-  const btnCloseCamera = $('btnCloseCamera')
-
   // ---------- 状态 ----------
   const state = {
     prepared: null, // { dataUri, width, height, size, resized }
     result: null,
     busy: false,
-    cameraStream: null,
-    facing: 'environment',
   }
 
   // marked UMD 在不同版本下挂载形状不同，做兼容
@@ -387,73 +377,6 @@
     layoutStage.insertAdjacentElement('afterend', tip)
   }
 
-  // ---------- 拍照 ----------
-  function cameraAvailable() {
-    return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
-  }
-
-  function stopCamera() {
-    if (state.cameraStream) {
-      state.cameraStream.getTracks().forEach((t) => t.stop())
-      state.cameraStream = null
-    }
-    cameraVideo.srcObject = null
-    cameraModal.hidden = true
-    cameraError.hidden = true
-  }
-
-  async function openCamera() {
-    cameraError.hidden = true
-
-    if (!cameraAvailable()) {
-      cameraError.textContent =
-        '当前环境不支持调用摄像头（浏览器要求 HTTPS 或 localhost 才能访问摄像头）'
-      cameraError.hidden = false
-      cameraModal.hidden = false
-      return
-    }
-
-    cameraModal.hidden = false
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: state.facing, width: { ideal: 1920 } },
-        audio: false,
-      })
-      state.cameraStream = stream
-      cameraVideo.srcObject = stream
-      await cameraVideo.play().catch(() => {})
-    } catch (err) {
-      cameraError.textContent = '无法打开摄像头：' + (err.message || err.name)
-      cameraError.hidden = false
-    }
-  }
-
-  function shoot() {
-    if (!state.cameraStream) return
-    const v = cameraVideo
-    const w = v.videoWidth || 1280
-    const h = v.videoHeight || 720
-    workCanvas.width = w
-    workCanvas.height = h
-    const ctx = workCanvas.getContext('2d')
-    ctx.drawImage(v, 0, 0, w, h)
-
-    workCanvas.toBlob(
-      (blob) => {
-        if (!blob) {
-          cameraError.textContent = '拍照失败，请重试'
-          cameraError.hidden = false
-          return
-        }
-        const file = new File([blob], `camera-${stamp()}.jpg`, { type: 'image/jpeg' })
-        stopCamera()
-        handleFile(file)
-      },
-      'image/jpeg',
-      0.92
-    )
-  }
-
   // ---------- 事件绑定 ----------
   dropzone.addEventListener('click', () => {
     if (!state.prepared) fileInput.click()
@@ -484,7 +407,7 @@
     if (file) handleFile(file)
   })
 
-  // 全局粘贴
+  // 全局粘贴：Ctrl/⌘ + V 直接粘截图
   document.addEventListener('paste', (e) => {
     if (state.busy) return
     const items = (e.clipboardData && e.clipboardData.items) || []
@@ -507,22 +430,8 @@
   })
 
   btnPick.addEventListener('click', () => fileInput.click())
-  btnCamera.addEventListener('click', openCamera)
   btnClear.addEventListener('click', clearAll)
   btnOcr.addEventListener('click', runOcr)
-  btnShoot.addEventListener('click', shoot)
-  btnCloseCamera.addEventListener('click', stopCamera)
-  btnSwitchCam.addEventListener('click', async () => {
-    state.facing = state.facing === 'environment' ? 'user' : 'environment'
-    if (state.cameraStream) {
-      state.cameraStream.getTracks().forEach((t) => t.stop())
-      state.cameraStream = null
-    }
-    await openCamera()
-  })
-  cameraModal.addEventListener('click', (e) => {
-    if (e.target === cameraModal) stopCamera()
-  })
 
   // Tab 切换
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), (tab) => {
@@ -562,11 +471,6 @@
   })
 
   // ---------- 启动 ----------
-  if (!cameraAvailable()) {
-    btnCamera.disabled = true
-    btnCamera.title = '需要 HTTPS 或 localhost 才能调用摄像头'
-  }
-
   ;(async function checkStatus() {
     try {
       const r = await fetch('api/info')

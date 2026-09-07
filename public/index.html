@@ -55,7 +55,6 @@
 
         <div class="btn-row">
           <button id="btnPick" type="button" class="btn">选择文件</button>
-          <button id="btnCamera" type="button" class="btn">拍照</button>
           <button id="btnClear" type="button" class="btn btn-ghost" disabled>清空</button>
         </div>
 
@@ -132,21 +131,7 @@
       </section>
     </main>
 
-    <!-- ============ 拍照弹窗 ============ -->
-    <div id="cameraModal" class="modal" hidden>
-      <div class="modal-card">
-        <div class="modal-head">
-          <h3>拍照识别</h3>
-          <button id="btnCloseCamera" type="button" class="icon-btn" aria-label="关闭">×</button>
-        </div>
-        <video id="cameraVideo" class="camera-video" playsinline autoplay muted></video>
-        <div class="modal-foot">
-          <button id="btnSwitchCam" type="button" class="btn btn-sm">切换摄像头</button>
-          <button id="btnShoot" type="button" class="btn btn-sm btn-primary">拍照</button>
-        </div>
-        <p id="cameraError" class="alert alert-error" hidden></p>
-      </div>
-    </div>
+    <!-- ============ 拍照弹窗（已移除，仅保留粘贴/拖拽/选择文件） ============ -->
 
     <canvas id="workCanvas" hidden></canvas>
     <input id="fileInput" type="file" accept="image/*" hidden />
