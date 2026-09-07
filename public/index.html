@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OCR-Page · 截图 / 拍照文字识别</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%84%3C/text%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">OCR</span>
+        <div class="brand-text">
+          <h1>OCR-Page</h1>
+          <p>粘贴截图 · 拖拽上传 · 拍照识别，保留原始排版</p>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span id="statusDot" class="status-dot" title="服务状态"></span>
+        <span id="statusText" class="status-text">检查中…</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <!-- ============ 左：输入 ============ -->
+      <section class="panel input-panel">
+        <div class="panel-head">
+          <h2>1. 输入图片</h2>
+          <span id="autoHint" class="hint">支持 Ctrl/⌘ + V 直接粘贴</span>
+        </div>
+
+        <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="选择或拖入图片">
+          <div id="dropzoneEmpty" class="dropzone-empty">
+            <svg viewBox="0 0 24 24" class="dz-icon" aria-hidden="true">
+              <path
+                d="M12 16V4m0 0L8 8m4-4 4 4M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <p class="dz-title">把截图粘贴到这里</p>
+            <p class="dz-sub">或拖拽图片 · 点击选择文件</p>
+          </div>
+          <div id="previewWrap" class="preview-wrap" hidden>
+            <img id="previewImg" class="preview-img" alt="待识别图片预览" />
+          </div>
+        </div>
+
+        <div class="btn-row">
+          <button id="btnPick" type="button" class="btn">选择文件</button>
+          <button id="btnCamera" type="button" class="btn">拍照</button>
+          <button id="btnClear" type="button" class="btn btn-ghost" disabled>清空</button>
+        </div>
+
+        <div id="fileMeta" class="file-meta" hidden></div>
+
+        <label class="switch">
+          <input id="autoRun" type="checkbox" checked />
+          <span>粘贴 / 上传后自动识别</span>
+        </label>
+
+        <button id="btnOcr" type="button" class="btn btn-primary btn-block" disabled>
+          开始识别
+        </button>
+
+        <div id="inputError" class="alert alert-error" hidden></div>
+      </section>
+
+      <!-- ============ 右：结果 ============ -->
+      <section class="panel result-panel">
+        <div class="panel-head">
+          <h2>2. 识别结果</h2>
+          <div id="resultMeta" class="hint"></div>
+        </div>
+
+        <div class="tabs" role="tablist">
+          <button class="tab is-active" data-tab="render" role="tab" type="button">排版预览</button>
+          <button class="tab" data-tab="markdown" role="tab" type="button">Markdown</button>
+          <button class="tab" data-tab="layout" role="tab" type="button">版面标注</button>
+        </div>
+
+        <div class="result-toolbar">
+          <button id="btnCopy" type="button" class="btn btn-sm" disabled>复制</button>
+          <button id="btnDownloadMd" type="button" class="btn btn-sm" disabled>下载 .md</button>
+          <button id="btnDownloadTxt" type="button" class="btn btn-sm" disabled>下载 .txt</button>
+        </div>
+
+        <!-- 空状态 -->
+        <div id="emptyState" class="empty-state">
+          <p>还没有识别结果</p>
+          <p class="empty-sub">左边放一张图片，识别结果会显示在这里</p>
+        </div>
+
+        <!-- 加载中 -->
+        <div id="loadingState" class="loading-state" hidden>
+          <div class="spinner" aria-hidden="true"></div>
+          <p>正在识别…</p>
+          <p class="loading-sub">复杂版面可能需要十几秒</p>
+        </div>
+
+        <div id="resultBody" class="result-body" hidden>
+          <!-- 排版预览 -->
+          <div id="tabRender" class="tab-panel is-active">
+            <article id="rendered" class="markdown-body"></article>
+          </div>
+
+          <!-- Markdown 源码 -->
+          <div id="tabMarkdown" class="tab-panel">
+            <pre id="rawMarkdown" class="raw-markdown"></pre>
+          </div>
+
+          <!-- 版面标注 -->
+          <div id="tabLayout" class="tab-panel">
+            <div id="layoutStage" class="layout-stage">
+              <p class="empty-sub">切换到「版面标注」查看识别到的版面元素</p>
+            </div>
+            <div id="layoutLegend" class="layout-legend" hidden>
+              <span class="legend-item"><i class="swatch sw-text"></i>文本</span>
+              <span class="legend-item"><i class="swatch sw-table"></i>表格</span>
+              <span class="legend-item"><i class="swatch sw-formula"></i>公式</span>
+              <span class="legend-item"><i class="swatch sw-image"></i>图片</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- ============ 拍照弹窗 ============ -->
+    <div id="cameraModal" class="modal" hidden>
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3>拍照识别</h3>
+          <button id="btnCloseCamera" type="button" class="icon-btn" aria-label="关闭">×</button>
+        </div>
+        <video id="cameraVideo" class="camera-video" playsinline autoplay muted></video>
+        <div class="modal-foot">
+          <button id="btnSwitchCam" type="button" class="btn btn-sm">切换摄像头</button>
+          <button id="btnShoot" type="button" class="btn btn-sm btn-primary">拍照</button>
+        </div>
+        <p id="cameraError" class="alert alert-error" hidden></p>
+      </div>
+    </div>
+
+    <canvas id="workCanvas" hidden></canvas>
+    <input id="fileInput" type="file" accept="image/*" hidden />
+
+    <script src="/vendor/marked.min.js"></script>
+    <script src="/vendor/purify.min.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "name": "ocr-page",
+  "version": "1.0.0",
+  "private": true,
+  "description": "基于智谱 GLM-OCR 的网页版截图 / 拍照识别工具，保留原始排版",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "dependencies": {
+    "dompurify": "^3.2.4",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "marked": "^15.0.12"
+  }
+}
