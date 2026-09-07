@@ -39,21 +39,30 @@ npm install --omit=dev
 pm2 reload ecosystem.config.cjs
 ```
 
-Nginx 反代示例（见 `deploy/nginx-ocr.conf`）：
+### Nginx 反代
+
+应用内部全部使用**相对路径**（`style.css`、`app.js`、`api/ocr`），所以挂在根路径或子路径下都能工作，无需改代码。
+
+推荐挂在现有 80 端口站点的 `/ocr/` 下（不用新开防火墙端口），把 `deploy/nginx-ocr.conf` 里的两个 location 放进现有 server 块：
 
 ```nginx
-server {
-    listen 8081;
-    server_name _;
-    location / {
-        proxy_pass http://127.0.0.1:3001;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        client_max_body_size 15m;   # 图片经 base64 后体积会膨胀约 33%
-    }
+location = /ocr {
+    return 301 /ocr/;
+}
+
+location /ocr/ {
+    proxy_pass http://127.0.0.1:3001/;   # 末尾的 / 会剥掉 /ocr/ 前缀
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    client_max_body_size 15m;            # base64 后体积膨胀约 33%
+    proxy_read_timeout 180s;
 }
 ```
+
+访问地址：`http://120.25.150.103/ocr/`
+
+需要独立端口时，`deploy/nginx-ocr.conf` 里也提供了监听 8081 的完整 server 块（需安全组放行）。
 
 ## 接口
 

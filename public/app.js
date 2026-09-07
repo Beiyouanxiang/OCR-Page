@@ -275,7 +275,7 @@
     setBusy(true)
 
     try {
-      const resp = await fetch('/api/ocr', {
+      const resp = await fetch('api/ocr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ image: state.prepared.dataUri }),
@@ -569,7 +569,7 @@
 
   ;(async function checkStatus() {
     try {
-      const r = await fetch('/api/info')
+      const r = await fetch('api/info')
       const d = await r.json()
       if (r.ok && d.status === 'ready') {
         statusDot.classList.add('ok')
