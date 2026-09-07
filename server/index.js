@@ -1,7 +1,8 @@
+import './env.js'
+
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
-import dotenv from 'dotenv'
 import express from 'express'
 
 import {
@@ -26,9 +27,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.join(__dirname, '..')
 const require = createRequire(import.meta.url)
 
-// 显式按固定路径加载，避免依赖进程 CWD（PM2 可能从 server/ 或根目录启动）
-dotenv.config({ path: path.join(ROOT, '.env') })
-dotenv.config({ path: path.join(__dirname, '.env') })
 
 const PORT = Number(process.env.PORT || 3001)
 const HOST = process.env.HOST || '127.0.0.1'
